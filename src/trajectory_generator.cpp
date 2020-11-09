@@ -1,11 +1,6 @@
 #include "trajectory_generator.h"
-using namespace std;    
+using namespace std;
 using namespace Eigen;
-
-static void MSKAPI printstr(void *handle, MSKCONST char str[])
-{
-  printf("%s",str);
-}
 
 int TrajectoryGenerator::BezierPloyCoeffGeneration(
             const vector<Cube> &corridor,
@@ -32,7 +27,7 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
 
     int n_poly = traj_order + 1;
     int s1d1CtrlP_num = n_poly;
-    int s1CtrlP_num   = 3 * s1d1CtrlP_num;
+    int s1CtrlP_num   = 3 * s1d1CtrlP_num; //number of coef each segment
 
     int equ_con_s_num = 3 * 3; // p, v, a in x, y, z axis at the start point
     int equ_con_e_num = 3 * 3; // p, v, a in x, y, z axis at the end point
@@ -49,24 +44,23 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         acc_con_num = 0;
 
     int high_order_con_num = vel_con_num + acc_con_num; 
-    //int high_order_con_num = 0; //3 * traj_order * segment_num;
-
-    int con_num   = equ_con_num + high_order_con_num;
+   
     int ctrlP_num = segment_num * s1CtrlP_num;
 
-    double x_var[ctrlP_num];
-    double primalobj;
-
-    MSKrescodee  r; 
-    vector< pair<MSKboundkeye, pair<double, double> > > con_bdk; 
+    vector<c_float> A_data;
+    vector<c_int> A_indices;
+    vector<c_int> A_indptr;
+    vector<c_float> lower_bounds;
+    vector<c_float> upper_bounds;
     
+    /*** constraints bound ***/
     if(ENFORCE_VEL)
     {
         /***  Stack the bounding value for the linear inequality for the velocity constraints  ***/
         for(int i = 0; i < vel_con_num; i++)
         {
-            pair<MSKboundkeye, pair<double, double> > cb_ie = make_pair( MSK_BK_RA, make_pair( - maxVel,  + maxVel) );
-            con_bdk.push_back(cb_ie);   
+            lower_bounds.push_back(- maxVel);
+            upper_bounds.push_back(+ maxVel);
         }
     }
 
@@ -75,15 +69,15 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         /***  Stack the bounding value for the linear inequality for the acceleration constraints  ***/
         for(int i = 0; i < acc_con_num; i++)
         {
-            pair<MSKboundkeye, pair<double, double> > cb_ie = make_pair( MSK_BK_RA, make_pair( - maxAcc,  maxAcc) ); 
-            con_bdk.push_back(cb_ie);   
+            lower_bounds.push_back(- maxAcc);
+            upper_bounds.push_back(+ maxAcc);
         }
     }
 
     //ROS_WARN("[Bezier Trajectory] equality bound %d", equ_con_num);
     for(int i = 0; i < equ_con_num; i ++ ){ 
         double beq_i;
-        if(i < 3)                    beq_i = pos(0, i); 
+        if(i < 3)                    beq_i = pos(0, i);
         else if (i >= 3  && i < 6  ) beq_i = vel(0, i - 3); 
         else if (i >= 6  && i < 9  ) beq_i = acc(0, i - 6);
         else if (i >= 9  && i < 12 ) beq_i = pos(1, i - 9 );
@@ -91,96 +85,14 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         else if (i >= 15 && i < 18 ) beq_i = acc(1, i - 15);
         else beq_i = 0.0;
 
-        pair<MSKboundkeye, pair<double, double> > cb_eq = make_pair( MSK_BK_FX, make_pair( beq_i, beq_i ) ); // # cb_eq means: constriants boundary of equality constrain
-        con_bdk.push_back(cb_eq);
+        lower_bounds.push_back(beq_i);
+        upper_bounds.push_back(beq_i);
     }
 
-    /* ## define a container for control points' boundary and boundkey ## */ 
-    /* ## dataType in one tuple is : boundary type, lower bound, upper bound ## */
-    vector< pair<MSKboundkeye, pair<double, double> > > var_bdk; 
-
-    for(int k = 0; k < segment_num; k++)
-    {   
-        Cube cube_     = corridor[k];
-        double scale_k = cube_.t;
-
-        for(int i = 0; i < 3; i++ )
-        {   
-            for(int j = 0; j < n_poly; j ++ )
-            {   
-                pair<MSKboundkeye, pair<double, double> > vb_x;
-
-                double lo_bound, up_bound;
-                if(k > 0)
-                {
-                    lo_bound = (cube_.box[i].first  + margin) / scale_k;
-                    up_bound = (cube_.box[i].second - margin) / scale_k;
-                }
-                else
-                {
-                    lo_bound = (cube_.box[i].first)  / scale_k;
-                    up_bound = (cube_.box[i].second) / scale_k;
-                }
-
-                vb_x  = make_pair( MSK_BK_RA, make_pair( lo_bound, up_bound ) ); // # vb_x means: varialbles boundary of unknowns x (Polynomial coeff)
-
-                var_bdk.push_back(vb_x);
-            }
-        } 
-    }
-
-    MSKint32t  j,i; 
-    MSKenv_t   env; 
-    MSKtask_t  task; 
-    // Create the mosek environment. 
-    r = MSK_makeenv( &env, NULL ); 
-  
-    // Create the optimization task. 
-    r = MSK_maketask(env,con_num, ctrlP_num, &task); 
-
-// Parameters used in the optimizer
-//######################################################################
-    //MSK_putintparam (task, MSK_IPAR_OPTIMIZER , MSK_OPTIMIZER_INTPNT );
-    MSK_putintparam (task, MSK_IPAR_NUM_THREADS, 1);
-    MSK_putdouparam (task, MSK_DPAR_CHECK_CONVEXITY_REL_TOL, 1e-2);
-    MSK_putdouparam (task, MSK_DPAR_INTPNT_TOL_DFEAS,  1e-4);
-    MSK_putdouparam (task, MSK_DPAR_INTPNT_TOL_PFEAS,  1e-4);
-    MSK_putdouparam (task, MSK_DPAR_INTPNT_TOL_INFEAS, 1e-4);
-    //MSK_putdouparam (task, MSK_DPAR_INTPNT_TOL_REL_GAP, 5e-2 );
-//######################################################################
     
-    //r = MSK_linkfunctotaskstream(task,MSK_STREAM_LOG,NULL,printstr); 
-    // Append empty constraints. 
-     //The constraints will initially have no bounds. 
-    if ( r == MSK_RES_OK ) 
-      r = MSK_appendcons(task,con_num);  
-
-    // Append optimizing variables. The variables will initially be fixed at zero (x=0). 
-    if ( r == MSK_RES_OK ) 
-      r = MSK_appendvars(task,ctrlP_num); 
-
-    //ROS_WARN("set variables boundary");
-    for(j = 0; j<ctrlP_num && r == MSK_RES_OK; ++j){ 
-        if (r == MSK_RES_OK) 
-            r = MSK_putvarbound(task, 
-                                j,                            // Index of variable. 
-                                var_bdk[j].first,             // Bound key.
-                                var_bdk[j].second.first,      // Numerical value of lower bound.
-                                var_bdk[j].second.second );   // Numerical value of upper bound.      
-    } 
-    
-    // Set the bounds on constraints. 
-    //   for i=1, ...,con_num : blc[i] <= constraint i <= buc[i] 
-    for( i = 0; i < con_num && r == MSK_RES_OK; i++ ) {
-        r = MSK_putconbound(task, 
-                            i,                            // Index of constraint. 
-                            con_bdk[i].first,             // Bound key.
-                            con_bdk[i].second.first,      // Numerical value of lower bound.
-                            con_bdk[i].second.second );   // Numerical value of upper bound. 
-    }
-
     //ROS_WARN("[Bezier Trajectory] Start stacking the Linear Matrix A, inequality part");
-    int row_idx = 0;
+    vector< vector < pair <c_int,c_float> >> variables(ctrlP_num);
+    int constraint_index = 0;
     // The velocity constraints
     if(ENFORCE_VEL)
     {   
@@ -191,17 +103,18 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                 for(int p = 0; p < traj_order; p++)
                 {
                     int nzi = 2;
-                    MSKint32t asub[nzi];
+                    int asub[nzi];
                     double aval[nzi];
 
                     aval[0] = -1.0 * traj_order;
                     aval[1] =  1.0 * traj_order;
 
                     asub[0] = k * s1CtrlP_num + i * s1d1CtrlP_num + p;    
-                    asub[1] = k * s1CtrlP_num + i * s1d1CtrlP_num + p + 1;    
+                    asub[1] = k * s1CtrlP_num + i * s1d1CtrlP_num + p + 1;
 
-                    r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-                    row_idx ++;
+                    variables[asub[0]].emplace_back(constraint_index, aval[0]);
+                    variables[asub[1]].emplace_back(constraint_index, aval[1]);
+                    constraint_index ++;
                 }
             }
         }
@@ -217,7 +130,7 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                 for(int p = 0; p < traj_order - 1; p++)
                 {    
                     int nzi = 3;
-                    MSKint32t asub[nzi];
+                    int asub[nzi];
                     double aval[nzi];
 
                     aval[0] =  1.0 * traj_order * (traj_order - 1) / corridor[k].t;
@@ -227,8 +140,10 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                     asub[1] = k * s1CtrlP_num + i * s1d1CtrlP_num + p + 1;    
                     asub[2] = k * s1CtrlP_num + i * s1d1CtrlP_num + p + 2;    
                     
-                    r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-                    row_idx ++;
+                    variables[asub[0]].emplace_back(constraint_index, aval[0]);
+                    variables[asub[1]].emplace_back(constraint_index, aval[1]);
+                    variables[asub[2]].emplace_back(constraint_index, aval[2]);
+                    constraint_index ++;
                 }
             }
         }
@@ -239,31 +154,36 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         for(int i = 0; i < 3; i++)
         {  // loop for x, y, z       
             int nzi = 1;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             aval[0] = 1.0 * initScale;
             asub[0] = i * s1d1CtrlP_num;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-            row_idx ++;
+
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            
+            constraint_index ++;
         }
         // velocity :
         for(int i = 0; i < 3; i++)
         {  // loop for x, y, z       
             int nzi = 2;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             aval[0] = - 1.0 * traj_order;
             aval[1] =   1.0 * traj_order;
             asub[0] = i * s1d1CtrlP_num;
             asub[1] = i * s1d1CtrlP_num + 1;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);   
-            row_idx ++;
+
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            variables[asub[1]].emplace_back(constraint_index, aval[1]);
+            
+            constraint_index ++;
         }
         // acceleration : 
         for(int i = 0; i < 3; i++)
         {  // loop for x, y, z       
             int nzi = 3;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             aval[0] =   1.0 * traj_order * (traj_order - 1) / initScale;
             aval[1] = - 2.0 * traj_order * (traj_order - 1) / initScale;
@@ -271,8 +191,13 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
             asub[0] = i * s1d1CtrlP_num;
             asub[1] = i * s1d1CtrlP_num + 1;
             asub[2] = i * s1d1CtrlP_num + 2;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-            row_idx ++;
+
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            variables[asub[1]].emplace_back(constraint_index, aval[1]);
+            variables[asub[2]].emplace_back(constraint_index, aval[2]);
+            //r = MSK_putarow(task, row_idx, nzi, asub, aval);    
+            //row_idx ++;
+            constraint_index ++;
         }
     }      
 
@@ -283,31 +208,36 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         for(int i = 0; i < 3; i++)
         {  // loop for x, y, z       
             int nzi = 1;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             asub[0] = ctrlP_num - 1 - (2 - i) * s1d1CtrlP_num;
             aval[0] = 1.0 * lstScale;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-            row_idx ++;
+            // r = MSK_putarow(task, row_idx, nzi, asub, aval);    
+            // row_idx ++;
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            constraint_index ++;
         }
         // velocity :
         for(int i = 0; i < 3; i++)
         { 
             int nzi = 2;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             asub[0] = ctrlP_num - 1 - (2 - i) * s1d1CtrlP_num - 1;
             asub[1] = ctrlP_num - 1 - (2 - i) * s1d1CtrlP_num;
             aval[0] = - 1.0;
             aval[1] =   1.0;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-            row_idx ++;
+            // r = MSK_putarow(task, row_idx, nzi, asub, aval);    
+            // row_idx ++;
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            variables[asub[1]].emplace_back(constraint_index, aval[1]);
+            constraint_index ++;
         }
         // acceleration : 
         for(int i = 0; i < 3; i++)
         { 
             int nzi = 3;
-            MSKint32t asub[nzi];
+            int asub[nzi];
             double aval[nzi];
             asub[0] = ctrlP_num - 1 - (2 - i) * s1d1CtrlP_num - 2;
             asub[1] = ctrlP_num - 1 - (2 - i) * s1d1CtrlP_num - 1;
@@ -315,8 +245,12 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
             aval[0] =   1.0 / lstScale;
             aval[1] = - 2.0 / lstScale;
             aval[2] =   1.0 / lstScale;
-            r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-            row_idx ++;
+            // r = MSK_putarow(task, row_idx, nzi, asub, aval);    
+            // row_idx ++;
+            variables[asub[0]].emplace_back(constraint_index, aval[0]);
+            variables[asub[1]].emplace_back(constraint_index, aval[1]);
+            variables[asub[2]].emplace_back(constraint_index, aval[2]);
+            constraint_index ++;
         }
     }
 
@@ -335,7 +269,7 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
             for(int i = 0; i < 3; i++)
             {  // loop for x, y, z
                 int nzi = 2;
-                MSKint32t asub[nzi];
+                int asub[nzi];
                 double aval[nzi];
 
                 // This segment's last control point
@@ -345,14 +279,19 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                 // Next segment's first control point
                 aval[1] = -1.0 * val1;
                 asub[1] = sub_shift + s1CtrlP_num + i * s1d1CtrlP_num;
-                r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-                row_idx ++;
+
+                variables[asub[0]].emplace_back(constraint_index, aval[0]);
+                variables[asub[1]].emplace_back(constraint_index, aval[1]);
+                //variables[asub[2]].pushback(constraint_index, aval[2]);
+                constraint_index ++;
+                // r = MSK_putarow(task, row_idx, nzi, asub, aval);    
+                // row_idx ++;
             }
             
             for(int i = 0; i < 3; i++)
             {  
                 int nzi = 4;
-                MSKint32t asub[nzi];
+                int asub[nzi];
                 double aval[nzi];
                 
                 // This segment's last velocity control point
@@ -367,8 +306,11 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                 asub[2] = sub_shift + s1CtrlP_num + i * s1d1CtrlP_num;    
                 asub[3] = sub_shift + s1CtrlP_num + i * s1d1CtrlP_num + 1;
 
-                r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-                row_idx ++;
+                variables[asub[0]].emplace_back(constraint_index, aval[0]);
+                variables[asub[1]].emplace_back(constraint_index, aval[1]);
+                variables[asub[2]].emplace_back(constraint_index, aval[2]);
+                variables[asub[3]].emplace_back(constraint_index, aval[3]);
+                constraint_index ++;
             }
             // acceleration :
             val0 = 1.0 / scale_k;
@@ -376,7 +318,7 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
             for(int i = 0; i < 3; i++)
             {  
                 int nzi = 6;
-                MSKint32t asub[nzi];
+                int asub[nzi];
                 double aval[nzi];
                 
                 // This segment's last velocity control point
@@ -394,13 +336,72 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
                 asub[4] = sub_shift + s1CtrlP_num + i * s1d1CtrlP_num + 1;
                 asub[5] = sub_shift + s1CtrlP_num + i * s1d1CtrlP_num + 2;
 
-                r = MSK_putarow(task, row_idx, nzi, asub, aval);    
-                row_idx ++;
+                variables[asub[0]].emplace_back(constraint_index, aval[0]);
+                variables[asub[1]].emplace_back(constraint_index, aval[1]);
+                variables[asub[2]].emplace_back(constraint_index, aval[2]);
+                variables[asub[3]].emplace_back(constraint_index, aval[3]);
+                variables[asub[4]].emplace_back(constraint_index, aval[4]);
+                variables[asub[5]].emplace_back(constraint_index, aval[5]);
+                constraint_index ++;
             }
 
             sub_shift += s1CtrlP_num;
         }
     }
+
+    for(int k = 0; k < segment_num; k++)
+    {   
+        Cube cube_     = corridor[k];
+        double scale_k = cube_.t;
+
+        for(int i = 0; i < 3; i++ )
+        {   
+            for(int j = 0; j < n_poly; j ++ )
+            {   
+                // pair<MSKboundkeye, pair<double, double> > vb_x;
+                // pair<double, double> vb_x;
+                int asub;
+                double aval;
+                double lo_bound, up_bound;
+                asub = k * s1CtrlP_num + i * s1d1CtrlP_num + j;
+                aval = 1.0;
+                if(k > 0)
+                {
+                    lo_bound = (cube_.box[i].first  + margin) / scale_k;
+                    up_bound = (cube_.box[i].second - margin) / scale_k;
+                }
+                else
+                {
+                    lo_bound = (cube_.box[i].first)  / scale_k;
+                    up_bound = (cube_.box[i].second) / scale_k;
+                }
+
+                // vb_x  = make_pair( lo_bound, up_bound ) ; // # vb_x means: varialbles boundary of unknowns x (Polynomial coeff)
+                variables[asub].emplace_back(constraint_index, aval);
+                lower_bounds.push_back(lo_bound);
+                upper_bounds.push_back(up_bound);
+                // var_bdk.push_back(vb_x);
+                constraint_index++;
+            }
+        } 
+    }
+
+    int ind_p = 0;
+    for (int i = 0; i < ctrlP_num; ++i) {
+        A_indptr.push_back(ind_p);
+        for (const auto& variable_nz : variables[i]) {
+            // coefficient
+            A_data.push_back(variable_nz.second);
+
+            // constraint index
+            A_indices.push_back(variable_nz.first);
+            ++ind_p;
+        }
+    }
+    // We indeed need this line because of
+    // https://github.com/oxfordcontrol/osqp/blob/master/src/cs.c#L255
+    A_indptr.push_back(ind_p);
+
 
     //ROS_WARN("[Bezier Trajectory] Start stacking the objective");
     
@@ -413,9 +414,10 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         int NUMQ_blk = (traj_order + 1);                       // default minimize the jerk and minimize_order = 3
         NUMQNZ      += 3 * NUMQ_blk * (NUMQ_blk + 1) / 2;
     }
-    MSKint32t  qsubi[NUMQNZ], qsubj[NUMQNZ];
-    double     qval[NUMQNZ];
-    
+
+    vector<c_float> P_data;
+    vector<c_int> P_indices;
+    vector<c_int> P_indptr;
     {    
         int sub_shift = 0;
         int idx = 0;
@@ -423,117 +425,94 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         {
             double scale_k = corridor[k].t;
             for(int p = 0; p < 3; p ++ )
-                for( int i = 0; i < s1d1CtrlP_num; i ++ )
-                    for( int j = 0; j < s1d1CtrlP_num; j ++ )
-                        if( i >= j )
+            {
+                for( int j = 0; j < s1d1CtrlP_num; j ++ )
+                {
+                    P_indptr.push_back(idx);
+                    for( int i = 0; i < s1d1CtrlP_num; i ++ )
+                    {
+                        if( j >= i )
                         {
-                            qsubi[idx] = sub_shift + p * s1d1CtrlP_num + i;   
-                            qsubj[idx] = sub_shift + p * s1d1CtrlP_num + j;  
+                            P_indices.push_back(sub_shift + p * s1d1CtrlP_num + i);
+                            // qsubi[idx] = sub_shift + p * s1d1CtrlP_num + i; 
+                            // qsubj[idx] = sub_shift + p * s1d1CtrlP_num + j;  
                             //qval[idx]  = MQM(i, j) /(double)pow(scale_k, 3);
                             if(min_order_l == min_order_u)
-                                qval[idx]  = MQM(i, j) /(double)pow(scale_k, 2 * min_order_u - 3);
+                                P_data.push_back(MQM(i, j) /(double)pow(scale_k, 2 * min_order_u - 3));
+                                // qval[idx]  = MQM(i, j) /(double)pow(scale_k, 2 * min_order_u - 3);
+                                
                             else
-                                qval[idx] = ( (minimize_order - min_order_l) / (double)pow(scale_k, 2 * min_order_u - 3)
-                                            + (min_order_u - minimize_order) / (double)pow(scale_k, 2 * min_order_l - 3) ) * MQM(i, j);
+                                P_data.push_back(( (minimize_order - min_order_l) / (double)pow(scale_k, 2 * min_order_u - 3)
+                                              + (min_order_u - minimize_order) / (double)pow(scale_k, 2 * min_order_l - 3) ) * MQM(i, j));
+                                // qval[idx] = ( (minimize_order - min_order_l) / (double)pow(scale_k, 2 * min_order_u - 3)
+                                            // + (min_order_u - minimize_order) / (double)pow(scale_k, 2 * min_order_l - 3) ) * MQM(i, j);
+    
                             idx ++ ;
                         }
+                    }
+                }
+            }
 
             sub_shift += s1CtrlP_num;
         }
+        P_indptr.push_back(idx);
     }
-         
+    vector<c_float> q;
+    for (int i = 0; i < ctrlP_num; i++)
+    {
+        q.push_back(0.0);
+    }
+
+
+    // OSQPData* data = FormulateProblem();
+    OSQPData* data = reinterpret_cast<OSQPData*>(c_malloc(sizeof(OSQPData)));
+    // CHECK_EQ(lower_bounds.size(), upper_bounds.size());
+
+    // size_t kernel_dim = 3 * num_of_knots_;
+    // size_t num_affine_constraint = lower_bounds.size();
+    size_t kernel_dim = ctrlP_num;
+    size_t num_affine_constraint = lower_bounds.size();
+
+    data->n = kernel_dim;
+    data->m = num_affine_constraint;
+    data->P = csc_matrix(kernel_dim, kernel_dim, NUMQNZ, CopyData(P_data),
+                         CopyData(P_indices), CopyData(P_indptr));
+    //P_data.size()
+    data->q = CopyData(q);
+    data->A = csc_matrix(num_affine_constraint, kernel_dim, A_data.size(),
+                   CopyData(A_data), CopyData(A_indices), CopyData(A_indptr));
+    data->l = CopyData(lower_bounds);
+    data->u = CopyData(upper_bounds);
+
     ros::Time time_end1 = ros::Time::now();
 
-    if ( r== MSK_RES_OK )
-         r = MSK_putqobj(task,NUMQNZ,qsubi,qsubj,qval); 
-    
-    if ( r==MSK_RES_OK ) 
-         r = MSK_putobjsense(task, MSK_OBJECTIVE_SENSE_MINIMIZE);
-    
-    //ros::Time time_opt = ros::Time::now();
-    bool solve_ok = false;
-    if ( r==MSK_RES_OK ) 
-      { 
-        //ROS_WARN("Prepare to solve the problem ");   
-        MSKrescodee trmcode; 
-        r = MSK_optimizetrm(task,&trmcode); 
-        MSK_solutionsummary (task,MSK_STREAM_LOG); 
-          
-        if ( r==MSK_RES_OK ) 
-        { 
-          MSKsolstae solsta; 
-          MSK_getsolsta (task,MSK_SOL_ITR,&solsta); 
-           
-          switch(solsta) 
-          { 
-            case MSK_SOL_STA_OPTIMAL:    
-            case MSK_SOL_STA_NEAR_OPTIMAL: 
-              
-            
-            r = MSK_getxx(task, 
-                          MSK_SOL_ITR,    // Request the interior solution.  
-                          x_var); 
-            
-            r = MSK_getprimalobj(
-                task,
-                MSK_SOL_ITR,
-                &primalobj);
 
-            obj = primalobj;
-            solve_ok = true;
-            
-            break; 
-            
-            case MSK_SOL_STA_DUAL_INFEAS_CER: 
-            case MSK_SOL_STA_PRIM_INFEAS_CER: 
-            case MSK_SOL_STA_NEAR_DUAL_INFEAS_CER: 
-            case MSK_SOL_STA_NEAR_PRIM_INFEAS_CER:   
-              printf("Primal or dual infeasibility certificate found.\n"); 
-              break; 
-               
-            case MSK_SOL_STA_UNKNOWN: 
-              printf("The status of the solution could not be determined.\n"); 
-              //solve_ok = true; // debug
-              break; 
-            default: 
-              printf("Other solution status."); 
-              break; 
-          } 
-        } 
-        else 
-        { 
-          printf("Error while optimizing.\n"); 
-        } 
-      }
-     
-      if (r != MSK_RES_OK) 
-      { 
-        // In case of an error print error code and description. 
-        char symname[MSK_MAX_STR_LEN]; 
-        char desc[MSK_MAX_STR_LEN]; 
-         
-        printf("An error occurred while optimizing.\n");      
-        MSK_getcodedesc (r, 
-                         symname, 
-                         desc); 
-        printf("Error %s - '%s'\n",symname,desc); 
-      } 
-    
-    MSK_deletetask(&task); 
-    MSK_deleteenv(&env); 
+    OSQPSettings* settings = SolverDefaultSettings();
+    // settings->max_iter = max_iter;
+    OSQPWorkspace* osqp_work = osqp_setup(data, settings);
+    osqp_solve(osqp_work);
+    auto status = osqp_work->info->status_val;
+
+    if (status < 0 || (status != 1 && status != 2)) {
+        osqp_cleanup(osqp_work);
+        FreeData(data);
+        c_free(settings);
+        return false;
+    } else if (osqp_work->solution == nullptr) {
+        osqp_cleanup(osqp_work);
+        FreeData(data);
+        c_free(settings);
+        return false;
+    }
 
     ros::Time time_end2 = ros::Time::now();
     ROS_WARN("time consume in optimize is :");
     cout<<time_end2 - time_end1<<endl;
 
-    if(!solve_ok){
-      ROS_WARN("In solver, falied ");
-      return -1;
-    }
 
     VectorXd d_var(ctrlP_num);
     for(int i = 0; i < ctrlP_num; i++)
-        d_var(i) = x_var[i];
+        d_var(i) = osqp_work->solution->x[i];
     
     PolyCoeff = MatrixXd::Zero(segment_num, 3 *(traj_order + 1) );
 
@@ -546,5 +525,33 @@ int TrajectoryGenerator::BezierPloyCoeffGeneration(
         var_shift += 3 * n_poly;
     }   
 
-    return 1;
+    // Cleanup
+    osqp_cleanup(osqp_work);
+    FreeData(data);
+    c_free(settings);
+    return true;
+}
+
+OSQPSettings* TrajectoryGenerator::SolverDefaultSettings() {
+    // Define Solver default settings
+    OSQPSettings* settings =
+        reinterpret_cast<OSQPSettings*>(c_malloc(sizeof(OSQPSettings)));
+    osqp_set_default_settings(settings);
+    settings->polish = true;
+    settings->verbose = false;
+    settings->scaled_termination = true;
+    return settings;
+}
+void TrajectoryGenerator::FreeData(OSQPData* data) {
+    delete[] data->q;
+    delete[] data->l;
+    delete[] data->u;
+
+    delete[] data->P->i;
+    delete[] data->P->p;
+    delete[] data->P->x;
+
+    delete[] data->A->i;
+    delete[] data->A->p;
+    delete[] data->A->x;
 }

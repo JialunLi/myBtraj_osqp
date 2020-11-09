@@ -7,7 +7,8 @@
 #include <iostream>
 #include <fstream>
 #include <string>
-#include "mosek.h"
+// #include "mosek.h"
+#include "osqp.h"
 #include "bezier_base.h"
 #include "data_type.h"
 
@@ -36,7 +37,18 @@ public:
             const bool & isLimitVel,
             const bool & isLimitAcc,
             double & obj,
-            MatrixXd & PolyCoeff); 
+            MatrixXd & PolyCoeff);
+protected:
+
+        virtual OSQPSettings* SolverDefaultSettings();
+        
+        void FreeData(OSQPData* data);
+
+        template <typename T> T* CopyData(const std::vector<T>& vec) {
+        T* data = new T[vec.size()];
+        memcpy(data, vec.data(), sizeof(T) * vec.size());
+        return data;
+    }
 };
 
 #endif

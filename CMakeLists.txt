@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.13)
 project(bezier_planer)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/sdf_tools)
@@ -21,10 +21,12 @@ catkin_package(
   INCLUDE_DIRS include
 )
 
-link_directories( ${PROJECT_SOURCE_DIR}/third_party/mosek/lib/mosek8_1 )
+#link_directories( ${PROJECT_SOURCE_DIR}/third_party/mosek/lib/mosek8_1 )
+link_directories(${PROJECT_SOURCE_DIR}/third_party/osqp-0.5.0/lib)
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
-include_directories(${PROJECT_SOURCE_DIR}/third_party/mosek/include)
+#include_directories(${PROJECT_SOURCE_DIR}/third_party/mosek/include)
+include_directories(${PROJECT_SOURCE_DIR}/third_party/osqp-0.5.0/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party/sdf_tools/include)
 
 include_directories(
@@ -48,14 +50,14 @@ add_executable(
     third_party/fast_methods/fm/fmdata/fmcell.cpp
     third_party/fast_methods/ndgridmap/cell.cpp
 )
-target_link_libraries(b_traj_node ${catkin_LIBRARIES} sdf_tools ${PCL_LIBRARIES} mosek64)
+target_link_libraries(b_traj_node ${catkin_LIBRARIES} sdf_tools ${PCL_LIBRARIES} osqp)
 
 add_executable ( b_traj_server src/traj_server.cpp src/bezier_base.cpp)
 target_link_libraries( b_traj_server
                         ${catkin_LIBRARIES}
 )
 
-add_executable ( random_forest_sensing src/random_forest_sensing.cpp )
+add_executable ( random_forest_sensing src/random_forest_sensing.cpp)
 target_link_libraries( random_forest_sensing
                         ${catkin_LIBRARIES}
                         ${PCL_LIBRARIES}
